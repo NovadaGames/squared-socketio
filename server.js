@@ -29,8 +29,14 @@ function getRoomAndDataBySocket(socket) {
   return { rid:null, room:null };
 }
 
+// --- ÚJ: determinisztikus players lista adott szobához
+function sortedPlayers(roomId) {
+  const r = rooms.get(roomId);
+  return r ? [...r.players].sort() : [];
+}
+
 io.on('connection', (socket) => {
-  // --- név beállítás
+  // --- név beállítás (belső állapot + opcionális room broadcast)
   socket.on('name:set', (nameRaw) => {
     const name = String(nameRaw || '').trim().slice(0,24) || 'Player';
     socket.data.name = name;
@@ -39,6 +45,20 @@ io.on('connection', (socket) => {
       room.names[socket.id] = name;
       io.to(rid).emit('room:names', { names: room.names });
     }
+  });
+
+  // --- ÚJ: kliens által használt név-announce csatorna
+  // A te frontended az 'player:name' eseményt küldi → ezt broadcastoljuk a szobába,
+  // hogy a másik kliens megkapja és frissíthesse az OPP_NAME-et.
+  socket.on('player:name', ({ roomId, name, from }) => {
+    const rid = roomId || getRoomAndDataBySocket(socket).rid;
+    if (!rid) return;
+    const n = String(name || '').trim().slice(0,24) || 'Player';
+    // belső állapot frissítés
+    const room = rooms.get(rid);
+    if (room) room.names[socket.id] = n;
+    // broadcast mindenkinek (a feladó is megkapja; a kliensed saját magát kiszűri)
+    io.to(rid).emit('player:name', { roomId: rid, name: n, from: socket.id });
   });
 
   // --- ROOM: create / join / leave
@@ -53,6 +73,7 @@ io.on('connection', (socket) => {
     socket.join(roomId);
     cb && cb({ ok:true, roomId });
     io.to(roomId).emit('room:names', { names: rooms.get(roomId).names });
+    // (game:ready-t itt még nem muszáj küldeni, egy játékosnál nincs jelentősége)
   });
 
   socket.on('room:join', (roomId, cb) => {
@@ -64,7 +85,8 @@ io.on('connection', (socket) => {
     socket.join(roomId);
     cb && cb({ ok:true, roomId });
     io.to(roomId).emit('room:names', { names: room.names });
-    io.to(roomId).emit('game:ready', { players: room.players, names: room.names });
+    // FIX: game:ready determinisztikus sorrendben
+    io.to(roomId).emit('game:ready', { players: sortedPlayers(roomId), names: room.names });
   });
 
   socket.on('room:leave', () => {
@@ -77,6 +99,8 @@ io.on('connection', (socket) => {
     else {
       io.to(rid).emit('room:names', { names: room.names });
       io.to(rid).emit('opponent:left');
+      // opcionális: újraküldhető a game:ready is, ha szeretnéd
+      // io.to(rid).emit('game:ready', { players: sortedPlayers(rid), names: room.names });
     }
   });
 
@@ -99,7 +123,8 @@ io.on('connection', (socket) => {
       io.sockets.sockets.get(b)?.join(roomId);
       io.to(roomId).emit('match:found', { roomId });
       io.to(roomId).emit('room:names', { names: rooms.get(roomId).names });
-      io.to(roomId).emit('game:ready', { players: [a,b], names: rooms.get(roomId).names });
+      // FIX: game:ready determinisztikus sorrendben
+      io.to(roomId).emit('game:ready', { players: sortedPlayers(roomId), names: rooms.get(roomId).names });
     }
   });
 
@@ -109,25 +134,26 @@ io.on('connection', (socket) => {
 
   // --- Játékmenet relay
   socket.on('game:start', (payload) => {
-    const rid = payload.roomId || getRoomAndDataBySocket(socket).rid;
+    const rid = payload?.roomId || getRoomAndDataBySocket(socket).rid;
     if (!rid) return;
+    // FONTOS: payload pass-through (benne hagyjuk a host által küldött 'names'-t)
     socket.to(rid).emit('game:start', payload);
   });
 
   socket.on('game:move', (payload) => {
-    const rid = payload.roomId || getRoomAndDataBySocket(socket).rid;
+    const rid = payload?.roomId || getRoomAndDataBySocket(socket).rid;
     if (!rid) return;
     socket.to(rid).emit('game:move', payload);
   });
 
   socket.on('game:surrender', (payload) => {
-    const rid = payload.roomId || getRoomAndDataBySocket(socket).rid;
+    const rid = payload?.roomId || getRoomAndDataBySocket(socket).rid;
     if (!rid) return;
     socket.to(rid).emit('game:surrender', payload);
   });
 
   socket.on('game:restart', (payload) => {
-    const rid = payload.roomId || getRoomAndDataBySocket(socket).rid;
+    const rid = payload?.roomId || getRoomAndDataBySocket(socket).rid;
     if (!rid) return;
     io.to(rid).emit('game:restart', payload);
   });
@@ -143,6 +169,7 @@ io.on('connection', (socket) => {
     else {
       io.to(rid).emit('room:names', { names: room.names });
       io.to(rid).emit('opponent:left');
+      // opcionális: io.to(rid).emit('game:ready', { players: sortedPlayers(rid), names: room.names });
     }
   });
 });
